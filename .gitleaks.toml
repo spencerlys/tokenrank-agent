@@ -1,0 +1,15 @@
+# gitleaks configuration. Default rules apply everywhere; the only allowlisted
+# paths are test code and the test-only mock server, which contain obviously
+# fake keys such as "sk-fake-0000-...-not-real".
+title = "tokenrank-agent"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Obviously fake keys in tests"
+paths = [
+  '''^internal/mockapi/[^/]+\.go$''',
+  '''^internal/[^/]+/[^/]+_test\.go$''',
+  '''^cmd/tokenrank-agent/[^/]+_test\.go$''',
+]

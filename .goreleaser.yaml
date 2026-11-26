@@ -1,0 +1,68 @@
+# Reproducible release builds. See README "Verify a release".
+version: 2
+
+project_name: tokenrank-agent
+
+before:
+  hooks:
+    - go mod download
+    - go mod verify
+
+builds:
+  - id: tokenrank-agent
+    main: ./cmd/tokenrank-agent
+    binary: tokenrank-agent
+    env:
+      # go-keyring needs no cgo: on macOS it runs /usr/bin/security, on
+      # Windows it uses the Credential Manager API, on Linux D-Bus.
+      - CGO_ENABLED=0
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -buildid= -X main.version={{.Version}}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - src: LICENSE
+        info:
+          mtime: "{{ .CommitDate }}"
+      - src: README.md
+        info:
+          mtime: "{{ .CommitDate }}"
+    builds_info:
+      mtime: "{{ .CommitDate }}"
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+signs:
+  - id: cosign-checksums
+    cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - --yes
+    output: true
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  sort: asc
+
+release:
+  draft: false
+  prerelease: auto

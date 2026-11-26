@@ -1,0 +1,23 @@
+# Build output
+/tokenrank-agent
+/tokenrank-agent.exe
+/dist/
+*.test
+*.out
+coverage.*
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+config.json
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local tool settings
+.claude/settings.local.json
