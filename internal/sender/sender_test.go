@@ -279,3 +279,58 @@ func TestBodyForwardedVerbatim(t *testing.T) {
 		t.Fatal("body not JSON")
 	}
 }
+
+// Supplier health: when the endpoint pushes back, the agent sends nothing more.
+func TestStopsOnPushback(t *testing.T) {
+	for _, tc := range []struct {
+		status     int
+		retryAfter string
+		want       time.Duration
+	}{
+		{429, "120", 120 * time.Second},
+		{503, "", 0},
+		{429, "999999", MaxRetryAfter},
+	} {
+		hits := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits++
+			if tc.retryAfter != "" {
+				w.Header().Set("Retry-After", tc.retryAfter)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(tc.status)
+			_, _ = w.Write([]byte(`{"error":{"message":"busy","type":"rate_limit_error"}}`))
+		}))
+		s := newSender(t, srv.URL, "openai")
+		res := s.Send(context.Background(), toBatchProbes(mockapi.DummyProbes("openai")))
+		srv.Close()
+		if hits != 1 {
+			t.Fatalf("status %d: endpoint saw %d requests, want 1", tc.status, hits)
+		}
+		if len(res) != 2 || res[0].HTTPStatus != tc.status || !strings.HasPrefix(res[1].Error, "not sent") {
+			t.Fatalf("status %d: results %+v", tc.status, res)
+		}
+		stopped, ra := s.Stopped()
+		if !stopped || ra != tc.want {
+			t.Fatalf("status %d: stopped=%v retryAfter=%v, want true %v", tc.status, stopped, ra, tc.want)
+		}
+	}
+}
+
+func TestNoStopOnOrdinaryErrors(t *testing.T) {
+	ep := mockapi.NewEndpoint(t, "openai", "sk-fake-some-other-key") // 401 for every request
+	s := newSender(t, ep.BaseURL, "openai")
+	s.Send(context.Background(), toBatchProbes(mockapi.DummyProbes("openai")))
+	if stopped, _ := s.Stopped(); stopped {
+		t.Fatal("a 401 is the user's key problem, not endpoint strain; it must not count as pushback")
+	}
+}
+
+func TestRetryAfterHTTPDate(t *testing.T) {
+	now := time.Date(2026, 11, 27, 2, 0, 0, 0, time.UTC)
+	h := http.Header{}
+	h.Set("Retry-After", now.Add(90*time.Second).Format(http.TimeFormat))
+	if d := parseRetryAfter(h, now); d != 90*time.Second {
+		t.Fatalf("got %v", d)
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"mime"
 	"net/http"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,6 +80,45 @@ type Sender struct {
 	opts   Options
 	client *http.Client
 	sleep  func(context.Context, time.Duration) error
+
+	stopped    bool          // the last Send stopped early because the endpoint pushed back
+	retryAfter time.Duration // the endpoint's Retry-After, if it sent one
+}
+
+// MaxRetryAfter caps how long a Retry-After header can push the next cycle out.
+const MaxRetryAfter = 24 * time.Hour
+
+// pushback reports whether a result means the endpoint is busy or failing. The agent
+// then sends nothing more in this batch: our requests must never add load to an
+// endpoint that is already struggling, or eat into its upstream account's limits.
+func pushback(r Result) bool {
+	return r.HTTPStatus == http.StatusTooManyRequests || r.HTTPStatus >= 500 ||
+		(r.HTTPStatus == 0 && r.Error != "" && !strings.HasPrefix(r.Error, "not sent"))
+}
+
+// Stopped reports whether the last Send stopped early, and the Retry-After the
+// endpoint asked for (0 if none).
+func (s *Sender) Stopped() (bool, time.Duration) { return s.stopped, s.retryAfter }
+
+// parseRetryAfter reads a Retry-After header: delay-seconds or an HTTP date.
+func parseRetryAfter(h http.Header, now time.Time) time.Duration {
+	v := strings.TrimSpace(h.Get("Retry-After"))
+	if v == "" {
+		return 0
+	}
+	var d time.Duration
+	if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+		d = time.Duration(secs) * time.Second
+	} else if t, err := http.ParseTime(v); err == nil {
+		d = t.Sub(now)
+	}
+	if d < 0 {
+		return 0
+	}
+	if d > MaxRetryAfter {
+		return MaxRetryAfter
+	}
+	return d
 }
 
 // NewHTTPClient returns a client that never follows redirects and honours the
@@ -152,20 +192,33 @@ func (s *Sender) jitter() time.Duration {
 	return lo + time.Duration(rand.Int64N(int64(hi-lo)+1))
 }
 
-// Send sends each request in order, pausing a random jitter between them.
-// It always returns one Result per request.
+// Send sends each request in order, one at a time, pausing a random jitter between
+// them. If the endpoint answers 429 or 5xx, or can't be reached, it stops: the rest
+// of the batch is reported as not sent, and Stopped returns the endpoint's
+// Retry-After. It always returns one Result per request.
 func (s *Sender) Send(ctx context.Context, probes []batch.Probe) []Result {
+	s.stopped, s.retryAfter = false, 0
 	results := make([]Result, 0, len(probes))
+	skipRest := func(from int, why string) {
+		for _, rest := range probes[from:] {
+			results = append(results, Result{ProbeID: rest.ProbeID, Error: "not sent: " + why})
+		}
+	}
 	for i, p := range probes {
 		if i > 0 {
 			if err := s.sleep(ctx, s.jitter()); err != nil {
-				for _, rest := range probes[i:] {
-					results = append(results, Result{ProbeID: rest.ProbeID, Error: "not sent: " + err.Error()})
-				}
+				skipRest(i, err.Error())
 				break
 			}
 		}
-		results = append(results, s.sendOne(ctx, p))
+		r := s.sendOne(ctx, p)
+		results = append(results, r)
+		if pushback(r) {
+			s.stopped = true
+			s.retryAfter = parseRetryAfter(r.Header, time.Now())
+			skipRest(i+1, "endpoint pushed back; stopped to avoid adding load")
+			break
+		}
 	}
 	return results
 }

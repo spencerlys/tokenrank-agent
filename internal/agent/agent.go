@@ -249,7 +249,18 @@ type Summary struct {
 	Sent            int
 	Failed          int
 	ScheduleMinutes int
+	// Throttled is set when the endpoint answered 429/5xx or couldn't be reached and
+	// the rest of the batch was not sent. RetryAfter is what the endpoint asked for.
+	Throttled  bool
+	RetryAfter time.Duration
 }
+
+// ThrottledCyclesBeforePause and ThrottlePause mirror the cloud's back-off rule:
+// after 3 throttled cycles in a row, leave the endpoint alone for 24 hours.
+const (
+	ThrottledCyclesBeforePause = 3
+	ThrottlePause              = 24 * time.Hour
+)
 
 // RunOnce performs one cycle: fetch, verify, send, upload.
 func RunOnce(ctx context.Context, env Env, o RunOptions) (Summary, error) {
@@ -317,6 +328,7 @@ func RunOnce(ctx context.Context, env Env, o RunOptions) (Summary, error) {
 		return sum, err
 	}
 	results := s.Send(ctx, b.Probes)
+	sum.Throttled, sum.RetryAfter = s.Stopped()
 	for _, r := range results {
 		if r.HTTPStatus != 0 {
 			sum.Sent++
@@ -339,7 +351,7 @@ func RunOnce(ctx context.Context, env Env, o RunOptions) (Summary, error) {
 // up to 8x the schedule.
 func Run(ctx context.Context, env Env, o RunOptions) error {
 	lg := env.logger()
-	failures := 0
+	failures, throttled := 0, 0
 	for {
 		sum, err := RunOnce(ctx, env, o)
 		if ctx.Err() != nil {
@@ -359,6 +371,18 @@ func Run(ctx context.Context, env Env, o RunOptions) error {
 			lg.Printf("batch %s: %d requests answered, %d with errors; results uploaded", sum.BatchID, sum.Sent, sum.Failed)
 		}
 		wait := nextWait(sum.ScheduleMinutes, failures)
+		if sum.Throttled {
+			throttled++
+			if sum.RetryAfter > wait {
+				wait = sum.RetryAfter
+			}
+			if throttled >= ThrottledCyclesBeforePause {
+				lg.Printf("endpoint pushed back %d cycles in a row; pausing for %s", throttled, ThrottlePause)
+				wait, throttled = ThrottlePause, 0
+			}
+		} else if err == nil {
+			throttled = 0
+		}
 		select {
 		case <-ctx.Done():
 			return nil

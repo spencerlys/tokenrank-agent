@@ -7,6 +7,13 @@ machine. It runs on macOS, Windows and Linux as a single binary.
 You might use it if you buy API access from a reseller and want TokenRank to
 see what your endpoint really serves, without handing your key to anyone.
 
+> **Status: pre-release.** The TokenRank cloud API is not live yet, so there
+> is nothing to register with today. The default API URL,
+> `https://api.tokenrank.example`, is a placeholder that resolves nowhere; the
+> agent will be pointed at the real address (or you will pass it with `--api`)
+> when the service launches. Until then the code can be built, read and tested
+> against the bundled mock server (`go test ./...`). There are no releases yet.
+
 ## What it does
 
 1. `register` tells the TokenRank cloud your endpoint's base URL and model
@@ -19,7 +26,11 @@ see what your endpoint really serves, without handing your key to anyone.
    expired, and that its validity window is at most 30 minutes. Every request
    path must be relative to your base URL.
 4. It sends the requests straight to your endpoint with the same headers the
-   official SDKs send, pausing a random interval between requests.
+   official SDKs send, one at a time, pausing a random interval between them.
+   If the endpoint answers 429 or 5xx, or can't be reached, it stops the batch
+   at once, waits at least as long as the endpoint's `Retry-After`, and after 3
+   such cycles in a row leaves the endpoint alone for 24 hours. A check must
+   never add load to a busy endpoint or use up its upstream account's limits.
 5. It uploads the raw results: status, output text, token counts, latency,
    time to first token, a few allowlisted response headers, and a SHA-256 of
    the endpoint's request id.
@@ -51,7 +62,7 @@ Download the archive for your platform from the
 [releases page](https://github.com/spencerlys/tokenrank-agent/releases),
 verify it (see below), unpack it and put `tokenrank-agent` on your `PATH`.
 
-Or build from source (Go 1.23 or newer):
+Or build from source (Go 1.27 or newer):
 
 ```sh
 git clone https://github.com/spencerlys/tokenrank-agent
